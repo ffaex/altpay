@@ -1,0 +1,4 @@
+network = "testnet"
+ldk_data_dir = "/root/.lightning/.ldk/"
+probe_amount = 100
+mpp_pref = 0
