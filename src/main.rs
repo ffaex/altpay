@@ -27,7 +27,6 @@ use std::path::Path;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::time::interval;
 use tokio::io::{Stdin, Stdout};
 use bitcoin_hashes::sha256;
 use bitcoin_hashes::Hash;
