@@ -80,7 +80,7 @@ async fn main() -> Result<(), anyhow::Error> {
 	let pk = match env::var("PK") {
 		Ok(value) => value,
 		Err(_) => {
-			log::info!("PK not set");
+			log::error!("PK not set");
 			panic!()
 		}
 	};
@@ -226,7 +226,6 @@ async fn network_probe(
 
 	let graph = _p.clone().state().networkgraph.clone();
 	let nodes = graph.read_only().nodes().clone();
-	log::info!("here suitohg");
 
 	tokio::spawn(async move {
 		for key in nodes.keys() {
@@ -248,7 +247,7 @@ async fn success(_p: Plugin<PlugState>, v: serde_json::Value) -> Result<(), Erro
 	let vec_routes = _p.state().clone().vec_routes;
 	let scorer = _p.state().clone().scorer;
 	let id = v["sendpay_success"]["id"].to_string().replace('\"', "");
-	log::info!("{id} id of success");
+	log::debug!("{id} id of success");
 	let route_hops = vec_routes.lock().unwrap().get(&id).unwrap().to_owned().1;
 
 	let mut scorer_value: Vec<_> = Vec::new();
@@ -291,7 +290,7 @@ async fn retry(_p: Plugin<PlugState>, v: serde_json::Value) -> Result<(), Error>
 
 		return Ok(());
 	}
-	log::info!("{}", "retry payment called");
+	log::debug!("{}", "retry payment called");
 	let bolt11 = json!([&v["sendpay_failure"]["data"]["bolt11"]]);
 	let state = _p.state().clone();
 	let scid = serde_json::to_string(&v["sendpay_failure"]["data"]["erring_channel"])
@@ -383,7 +382,7 @@ async fn probe(
 	let route: Route = match route_find(_p.clone(), &route_params).await {
 		Some(s) => s,
 		None => {
-			log::info!("failed to find route");
+			log::error!("failed to find route");
 			_p.state().failed_channels.lock().unwrap().clear();
 			return Ok(json!("failed to find route"));
 		}
@@ -519,7 +518,7 @@ async fn get_and_send_route(
 				let tmp: serde_json::Value =
 					serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
 				let id = tmp["result"]["id"].to_string().replace('\"', "");
-				log::info!("{id} id of insert");
+				log::debug!("{id} id of insert");
 				_p.state()
 					.clone()
 					.vec_routes
@@ -565,9 +564,9 @@ async fn sync_graph(p: Plugin<PlugState>) {
 		< 60 * 5 
 		&& timestam != 0
 	{
-		log::info!("no need to sync graph");
+		log::debug!("no need to sync graph");
 	} else {
-		log::info!("syncing graph");
+		log::debug!("syncing graph");
 		let url = if p.state().config.network == "bitcoin" {
 			"https://rapidsync.lightningdevkit.org/snapshot/".to_string()
 		} else {
@@ -640,7 +639,7 @@ async fn altpay_method(
 					.as_secs(),
 		),
 		None => {
-			log::info!("invoice has no expiry");
+			log::debug!("invoice has no expiry");
 			None
 		}
 	};
