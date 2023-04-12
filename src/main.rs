@@ -36,6 +36,7 @@ use config::Config;
 use lightning::routing::gossip::{NetworkGraph, NodeId};
 use lightning_rapid_gossip_sync::RapidGossipSync;
 use rand_core::{OsRng, RngCore};
+use tokio_util::sync::CancellationToken;
 
 #[derive(Clone)]
 struct PlugState {
@@ -56,6 +57,7 @@ struct PlugState {
 	pk: secp256k1::PublicKey,
 	random_pay_hash: sha256::Hash,
 	config: Conf,
+	ct_token: Arc<Mutex<CancellationToken>>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -148,6 +150,7 @@ async fn main() -> Result<(), anyhow::Error> {
 		pk: secp256k1::PublicKey::from_str(&pk).unwrap(),
 		random_pay_hash,
 		config,
+		ct_token: Arc::new(Mutex::new(CancellationToken::new())),
 	};
 
 	if let Some(plugin) =
@@ -160,6 +163,7 @@ async fn main() -> Result<(), anyhow::Error> {
 				"sets penalty for a given publickey and a value",
 				set_penalty,
 			)
+			.rpcmethod("stop_probe", "stops network probe", stop_probe)
 			.subscribe("sendpay_failure", retry)
 			.subscribe("sendpay_success", success)
 			.subscribe("shutdown", shutdown)
@@ -171,6 +175,12 @@ async fn main() -> Result<(), anyhow::Error> {
 	} else {
 		Ok(())
 	}
+}
+async fn stop_probe(_p: Plugin<PlugState>, _v: serde_json::Value) -> Result<serde_json::Value, anyhow::Error> {
+	log::info!("stopping probe");
+	let ct = _p.state().ct_token.lock().unwrap();
+	ct.cancel();
+	Ok(json!("stopped probe"))
 }
 
 async fn shutdown(_p: Plugin<PlugState>, _v: serde_json::Value) -> Result<(), anyhow::Error> {
@@ -225,13 +235,17 @@ async fn network_probe(
 
 	let graph = _p.clone().state().networkgraph.clone();
 	let nodes = graph.read_only().nodes().clone();
-
+	*_p.state().ct_token.lock().unwrap() = CancellationToken::new();
 	tokio::spawn(async move {
 		for key in nodes.keys() {
 			let pubkey = secp256k1::PublicKey::from_slice(&key.as_slice()).unwrap();
 			let _p_clone = _p.clone();
 	
 			probe(_p_clone.clone(), json!([pubkey.to_string()])).await.unwrap();
+			if _p.state().ct_token.lock().unwrap().is_cancelled() {
+				log::info!("stopped network probe");
+				break;
+			}
 			tokio::time::sleep(Duration::from_millis(5000)).await;
 		}	
 	});
@@ -560,14 +574,14 @@ async fn sync_graph(p: Plugin<PlugState>) {
 		.unwrap()
 		.as_secs()
 		.saturating_sub(timestam)
-		< 60 * 5 
+		< 60 * 5 // syncs every 5 minutes
 		&& timestam != 0
 	{
 		log::debug!("no need to sync graph");
 	} else {
 		log::debug!("syncing graph");
 		let url = if p.state().config.network == "bitcoin" {
-			"https://rapidsync.lightningdevkit.org/snapshot/".to_string()
+			"http://rapidsync.fyodor.de/mainnet/snapshot/".to_string()
 		} else {
 			"http://rapidsync.fyodor.de/snapshot/".to_string()
 		};
