@@ -254,8 +254,10 @@ async fn success(_p: Plugin<PlugState>, v: serde_json::Value) -> Result<(), Erro
 	let scorer = _p.state().clone().scorer;
 	let id = v["sendpay_success"]["id"].to_string().replace('\"', "");
 	log::debug!("{id} id of success");
-	let route_hops = vec_routes.lock().unwrap().get(&id).unwrap().to_owned().1;
-
+	let route_hops = match vec_routes.lock().unwrap().get(&id){
+		Some(s) => s.to_owned().1,
+		None => return Ok(()), // not sent with altpay
+	};
 	let mut scorer_value: Vec<_> = Vec::new();
 	for i in route_hops.iter() {
 		scorer_value.push(i)
