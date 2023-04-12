@@ -45,7 +45,7 @@ mpp_pref = 0 (the lower the better)
 - source $HOME/.bashrc
 4. Start lightningd --testnet --plugin=/path to binary
 
-Please note if opening new channels on testnet it can take up to 30min for the plugin to see them.
+Please note if opening new channels it can take up to 30min for the plugin to see them. Because it uses RapidSync https://lightningdevkit.org/blog/announcing-rapid-gossip-sync/. Uses this rapidsync server http://rapidsync.fyodor.de/. SNAPSHOT_CALCULATION_INTERVAL set to 30min
 # Usage 
 lightning-cli --testnet altpay bolt11_invoice  
 lightning-cli --testnet probe pubkey amount_msat  
