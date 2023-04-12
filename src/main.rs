@@ -15,7 +15,7 @@ use lightning::routing::router::{
 	DefaultRouter, InFlightHtlcs, PaymentParameters, Route, RouteHop, Router,
 };
 use lightning::routing::scoring::{
-	ProbabilisticScorer, ProbabilisticScorerUsingTime, ProbabilisticScoringParameters, Score,
+	ProbabilisticScorerUsingTime, Score,
 };
 use lightning::util::ser::{Writeable, Writer};
 use lightning_invoice::*;
@@ -119,25 +119,18 @@ async fn main() -> Result<(), anyhow::Error> {
 	));
 	// scorer from disk
 	let scorer_path = format!("{}/scorer", ldk_data_dir.clone());
-	let _scorer = Arc::new(Mutex::new(disk::read_scorer(
+	let scorer = Arc::new(Mutex::new(disk::read_scorer(
 		Path::new(&scorer_path),
 		Arc::clone(&network_graph),
 		Arc::clone(&logger),
 	)));
-	let params = ProbabilisticScoringParameters {
-		..ProbabilisticScoringParameters::default()
-	};
 	let mut rng = rand::thread_rng();
     let mut random_bytes = [0u8; 32];
     rng.fill(&mut random_bytes);
 
 
 	let random_pay_hash = sha256::Hash::from_slice(&random_bytes[..]).unwrap();
-	let scorer = Arc::new(Mutex::new(ProbabilisticScorer::new(
-		params,
-		Arc::clone(&network_graph),
-		Arc::clone(&logger),
-	)));
+
 	let vec_routes: Arc<Mutex<HashMap<String, (u128, Box<[RouteHop]>)>>> =
 		Arc::new(Mutex::new(HashMap::new()));
 	let state = PlugState {
