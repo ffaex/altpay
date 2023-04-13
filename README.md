@@ -39,6 +39,7 @@ network = "testnet" # Use "bitcoin" for mainnet
 ldk_data_dir = "/path/to/your/ldk_data_dir"  
 rpc_path = "/path/to/your/lightning-rpc"  
 mpp_pref = 0 (the lower the better)
+rpc_path="/root/.lightning/testnet/lightning-rpc" # path to the clightning rpc socket
 
 2. set PK env variable to your public key of your lighting node 
 - echo 'export PK="your public key"' >> $HOME/.bashrc

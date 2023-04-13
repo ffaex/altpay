@@ -95,7 +95,13 @@ async fn main() -> Result<(), anyhow::Error> {
 		.add_source(config::File::with_name(&format!("{}/.config/altpay.toml", home_dir)))
 		.build()
 		.unwrap();
-	let config: Conf = settings.try_deserialize().unwrap();
+	let mut config: Conf = settings.try_deserialize().unwrap();
+	config.rpc_path = if config.network == "bitcoin" {
+		format!("{}/.lightning/bitcoin/lightning-rpc", home_dir)}
+	else {
+		format!("{}/.lightning/testnet/lightning-rpc", home_dir)
+	};
+
  	let ldk_data_dir = config.ldk_data_dir.clone();
 	let network = if config.network == "bitcoin" {
 		Network::Bitcoin
@@ -587,6 +593,7 @@ async fn sync_graph(p: Plugin<PlugState>) {
 		log::debug!("syncing graph");
 		let url = if p.state().config.network == "bitcoin" {
 			"http://rapidsync.fyodor.de/mainnet/snapshot/".to_string()
+			//"https://rapidsync.lightningdevkit.org/snapshot/".to_string()
 		} else {
 			"http://rapidsync.fyodor.de/snapshot/".to_string()
 		};
