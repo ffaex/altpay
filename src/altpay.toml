@@ -2,3 +2,4 @@ network = "testnet" # use "bitcoin" for mainnet
 ldk_data_dir = "/root/.lightning/.ldk/" # use different dirs for mainnet and testnet
 probe_amount = 100
 mpp_pref = 0.5
+rpc_path="/root/.lightning/testnet/lightning-rpc" # path to the clightning rpc socket

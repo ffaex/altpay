@@ -95,7 +95,13 @@ async fn main() -> Result<(), anyhow::Error> {
 		.add_source(config::File::with_name(&format!("{}/.config/altpay.toml", home_dir)))
 		.build()
 		.unwrap();
-	let config: Conf = settings.try_deserialize().unwrap();
+	let mut config: Conf = settings.try_deserialize().unwrap();
+	config.rpc_path = if config.network == "bitcoin" {
+		format!("{}/.lightning/bitcoin/lightning-rpc", home_dir)}
+	else {
+		format!("{}/.lightning/testnet/lightning-rpc", home_dir)
+	};
+
  	let ldk_data_dir = config.ldk_data_dir.clone();
 	let network = if config.network == "bitcoin" {
 		Network::Bitcoin
@@ -156,6 +162,7 @@ async fn main() -> Result<(), anyhow::Error> {
 				"sets penalty for a given publickey and a value",
 				set_penalty,
 			)
+			.rpcmethod("debug_network", "debugs network graph", debug_network)
 			.rpcmethod("stop_probe", "stops network probe", stop_probe)
 			.subscribe("sendpay_failure", retry)
 			.subscribe("sendpay_success", success)
@@ -169,6 +176,15 @@ async fn main() -> Result<(), anyhow::Error> {
 		Ok(())
 	}
 }
+async fn debug_network(_p: Plugin<PlugState>, _v: serde_json::Value) -> Result<serde_json::Value, anyhow::Error> {
+	let network_graph = _p.state().networkgraph.read_only();
+	network_graph.channels().iter().for_each(|(chan_id, chan)| {
+		log::info!("chan_id: {}", chan_id);
+		log::info!("chan: {:?}", chan);
+	});	
+	Ok(json!("debugged network"))
+}
+
 async fn stop_probe(_p: Plugin<PlugState>, _v: serde_json::Value) -> Result<serde_json::Value, anyhow::Error> {
 	log::info!("stopping probe");
 	let ct = _p.state().ct_token.lock().unwrap();
@@ -254,8 +270,10 @@ async fn success(_p: Plugin<PlugState>, v: serde_json::Value) -> Result<(), Erro
 	let scorer = _p.state().clone().scorer;
 	let id = v["sendpay_success"]["id"].to_string().replace('\"', "");
 	log::debug!("{id} id of success");
-	let route_hops = vec_routes.lock().unwrap().get(&id).unwrap().to_owned().1;
-
+	let route_hops = match vec_routes.lock().unwrap().get(&id){
+		Some(s) => s.to_owned().1,
+		None => return Ok(()), // not sent with altpay
+	};
 	let mut scorer_value: Vec<_> = Vec::new();
 	for i in route_hops.iter() {
 		scorer_value.push(i)
@@ -575,6 +593,7 @@ async fn sync_graph(p: Plugin<PlugState>) {
 		log::debug!("syncing graph");
 		let url = if p.state().config.network == "bitcoin" {
 			"http://rapidsync.fyodor.de/mainnet/snapshot/".to_string()
+			//"https://rapidsync.lightningdevkit.org/snapshot/".to_string()
 		} else {
 			"http://rapidsync.fyodor.de/snapshot/".to_string()
 		};
@@ -634,6 +653,10 @@ async fn altpay_method(
 	} else {
 		*payee_key.unwrap()
 	};
+	if invoice.is_expired() {
+		log::info!("invoice is expired");
+		return Ok(json!("invoice is expired"));
+	}
 	// need expiry time in seconds from UNIX_EPOCH for PaymnetParameters TODO look into this
 	let expiry = match expiry {
 		Some(_) => Some(
