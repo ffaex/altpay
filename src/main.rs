@@ -265,9 +265,9 @@ async fn network_probe(
 	Ok(json!("network probe started"))
 }
 
-async fn success(_p: Plugin<PlugState>, v: serde_json::Value) -> Result<(), Error> {
-	let vec_routes = _p.state().clone().vec_routes;
-	let scorer = _p.state().clone().scorer;
+async fn success(plugin: Plugin<PlugState>, v: serde_json::Value) -> Result<(), Error> {
+	let vec_routes = plugin.state().clone().vec_routes;
+	let scorer = plugin.state().clone().scorer;
 	let id = v["sendpay_success"]["id"].to_string().replace('\"', "");
 	log::debug!("{id} id of success");
 	let route_hops = match vec_routes.lock().unwrap().get(&id){
@@ -286,7 +286,7 @@ async fn success(_p: Plugin<PlugState>, v: serde_json::Value) -> Result<(), Erro
 	Ok(())
 }
 
-async fn retry(_p: Plugin<PlugState>, v: serde_json::Value) -> Result<(), Error> {
+async fn retry(plugin: Plugin<PlugState>, v: serde_json::Value) -> Result<(), Error> {
 	let id = v["sendpay_failure"]["data"]["id"]
 		.to_string()
 		.replace('\"', "");
@@ -294,10 +294,10 @@ async fn retry(_p: Plugin<PlugState>, v: serde_json::Value) -> Result<(), Error>
 	if serde_json::to_string(&v["sendpay_failure"]["data"]["payment_hash"])
 		.unwrap()
 		.replace('\"', "")
-		== _p.state().random_pay_hash.to_string()
+		== plugin.state().random_pay_hash.to_string()
 	{
 		log::info!("not retrying because probe");
-		let vec_routes = _p.state().clone().vec_routes;
+		let vec_routes = plugin.state().clone().vec_routes;
 		let routes_guard = vec_routes.lock().unwrap();
 		let now = SystemTime::now()
 			.duration_since(UNIX_EPOCH)
@@ -316,13 +316,13 @@ async fn retry(_p: Plugin<PlugState>, v: serde_json::Value) -> Result<(), Error>
 	}
 	log::debug!("{}", "retry payment called");
 	let bolt11 = json!([&v["sendpay_failure"]["data"]["bolt11"]]);
-	let state = _p.state().clone();
+	let state = plugin.state().clone();
 	let scid = serde_json::to_string(&v["sendpay_failure"]["data"]["erring_channel"])
 		.unwrap()
 		.replace('\"', "");
 	let scid = cl_to_int(&scid);
 
-	let vec_routes = _p.state().clone().vec_routes;
+	let vec_routes = plugin.state().clone().vec_routes;
 	let route_hops = vec_routes.lock().unwrap().get(&id).unwrap().to_owned().1;
 
 	let mut scorer_value: Vec<_> = Vec::new();
@@ -341,15 +341,15 @@ async fn retry(_p: Plugin<PlugState>, v: serde_json::Value) -> Result<(), Error>
 				.payment_path_failed(&scorer_value, scid);
 		}
 	}
-	altpay_method(_p.clone(), bolt11.clone()).await?;
+	altpay_method(plugin.clone(), bolt11.clone()).await?;
 
 	Ok(())
 }
 
 
 // converts shortchannelid from c-lightning format to u64 format which ldk uses
-fn cl_to_int(s: &str) -> u64 {
-	let split = s.split('x');
+fn cl_to_int(scid: &str) -> u64 {
+	let split = scid.split('x');
 	let vec: Vec<&str> = split.collect();
 	vec[0].parse::<u64>().unwrap() << 40
 		| vec[1].parse::<u64>().unwrap() << 16
@@ -357,28 +357,27 @@ fn cl_to_int(s: &str) -> u64 {
 }
 
 // converts shortchannelid from u64 Format which ldk uses to c-lightning format
-fn u64_cl(s: u64) -> std::string::String {
-	let block = s >> 40;
-	let tx = s >> 16 & 0xFFFFFF;
-	let output = s & 0xFFFF;
+fn u64_cl(scid: u64) -> std::string::String {
+	let block = scid >> 40;
+	let tx = scid >> 16 & 0xFFFFFF;
+	let output = scid & 0xFFFF;
 
 	format!("{block}x{tx}x{output}")
 }
 // for probing
 async fn probe(
-	_p: Plugin<PlugState>,
-	v: serde_json::Value,
+	plugin: Plugin<PlugState>,
+	cli_arguments: serde_json::Value,
 ) -> Result<serde_json::Value, anyhow::Error> {
-	sync_graph(_p.clone()).await;
+	sync_graph(plugin.clone()).await;
 
-	let pub_key_arg = match v[0].as_str() {
+	let pub_key_arg = match cli_arguments[0].as_str() {
 		Some(s) => s,
 		None => return Ok(json!("no pub key given as first argument")),
 	};
-	let probe_option = v[1].as_u64().unwrap_or(_p.state().config.probe_amount);
-	// log::info!("{} value of probe option", probe_option);
+	let probe_option = cli_arguments[1].as_u64().unwrap_or(plugin.state().config.probe_amount);
 	let payee_key = match secp256k1::PublicKey::from_str(pub_key_arg) {
-		Ok(s) => s,
+		Ok(value) => value,
 		Err(e) => return Ok(json!(e.to_string())),
 	};
 
@@ -390,8 +389,8 @@ async fn probe(
 		expiry_time: None,
 		max_total_cltv_expiry_delta: 1008,
 		max_path_count: 10,
-		max_channel_saturation_power_of_half: _p.state().config.mpp_pref, // might be used to optimize stuff lol TODO
-		previously_failed_channels: _p.state().failed_channels.lock().unwrap().to_vec(), // TODO
+		max_channel_saturation_power_of_half: plugin.state().config.mpp_pref, // might be used to optimize stuff lol TODO
+		previously_failed_channels: plugin.state().failed_channels.lock().unwrap().to_vec(), // TODO
 	};
 	// log::info!("{:?}", my_params);
 	let route_params = RouteParameters {
@@ -399,15 +398,15 @@ async fn probe(
 		final_value_msat: probe_option, //_p.state().conf.probe_amount,
 		final_cltv_expiry_delta: 18,
 	};
-	let payment_hash = _p.state().random_pay_hash;
+	let payment_hash = plugin.state().random_pay_hash;
 	let payment_secret = PaymentSecret([42u8; 32]);
 
 	// route_params
-	let route: Route = match route_find(_p.clone(), &route_params).await {
+	let route: Route = match route_find(plugin.clone(), &route_params).await {
 		Some(s) => s,
 		None => {
 			log::error!("failed to find route");
-			_p.state().failed_channels.lock().unwrap().clear();
+			plugin.state().failed_channels.lock().unwrap().clear();
 			return Ok(json!("failed to find route"));
 		}
 	};
@@ -417,23 +416,23 @@ async fn probe(
 		payment_secret,
 		Amount::from_msat(probe_option),
 		String::from("Probe"),
-		_p.clone(),
+		plugin.clone(),
 	)
 	.await;
 	Ok(json!("probe sent successfully"))
 }
-/// get route from c-lightning and send it to ldk
+/// get route from ldk and send it to c-lightning
 async fn get_and_send_route(
 	route: Route,
 	payment_hash: bitcoin_hashes::sha256::Hash,
 	payment_secret: lightning::ln::PaymentSecret,
 	amount: cln_rpc::primitives::Amount,
 	string_invoice: String,
-	_p: Plugin<PlugState>,
+	plugin: Plugin<PlugState>,
 ) {
-	let rpc_path = _p.state().config.rpc_path.clone();
-	let p = Path::new(&rpc_path);
-	let mut rpc = ClnRpc::new(p).await.unwrap();
+	let rpc_path = plugin.state().config.rpc_path.clone();
+	let path_object = Path::new(&rpc_path);
+	let mut rpc = ClnRpc::new(path_object).await.unwrap();
 
 	let mut routes = Vec::new();
 	
@@ -543,7 +542,7 @@ async fn get_and_send_route(
 					serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
 				let id = tmp["result"]["id"].to_string().replace('\"', "");
 				log::debug!("{id} id of insert");
-				_p.state()
+				plugin.state()
 					.clone()
 					.vec_routes
 					.clone()
@@ -559,7 +558,7 @@ async fn get_and_send_route(
 				if s.code.unwrap() != 204 {
 					log::error!("error in sendpay: {:?}", s);
 				}
-				_p.state()
+				plugin.state()
 					.failed_channels
 					.lock()
 					.unwrap()
@@ -569,9 +568,9 @@ async fn get_and_send_route(
 	}
 }
 
-async fn sync_graph(p: Plugin<PlugState>) {
-	let ldk_data_dir = p.state().ldk_data_dir.clone();
-	let network_graph = p.state().networkgraph.clone();
+async fn sync_graph(plugin: Plugin<PlugState>) {
+	let ldk_data_dir = plugin.state().ldk_data_dir.clone();
+	let network_graph = plugin.state().networkgraph.clone();
 
 	// sync graph with rapid sync
 	let rapid_sync = RapidGossipSync::new(network_graph.clone());
@@ -591,7 +590,7 @@ async fn sync_graph(p: Plugin<PlugState>) {
 		log::debug!("no need to sync graph");
 	} else {
 		log::debug!("syncing graph");
-		let url = if p.state().config.network == "bitcoin" {
+		let url = if plugin.state().config.network == "bitcoin" {
 			"http://rapidsync.fyodor.de/mainnet/snapshot/".to_string()
 			//"https://rapidsync.lightningdevkit.org/snapshot/".to_string()
 		} else {
@@ -630,16 +629,16 @@ async fn route_find(p: Plugin<PlugState>, route_params: &RouteParameters) -> Opt
 }
 
 async fn altpay_method(
-	_p: Plugin<PlugState>,
-	_v: serde_json::Value,
+	plugin: Plugin<PlugState>,
+	cli_arguments: serde_json::Value,
 ) -> Result<serde_json::Value, Error> {
-	let ldk_data_dir = _p.state().ldk_data_dir.clone();
-	let network_graph = _p.state().networkgraph.clone();
-	let scorer = _p.state().scorer.clone();
-	let _logger = _p.state().logger.clone();
+	let ldk_data_dir = plugin.state().ldk_data_dir.clone();
+	let network_graph = plugin.state().networkgraph.clone();
+	let scorer = plugin.state().scorer.clone();
+	let _logger = plugin.state().logger.clone();
 
 	// invoice stuff
-	let string_invoice = _v.get(0).unwrap().as_str().unwrap().replace('\\', "");
+	let string_invoice = cli_arguments.get(0).unwrap().as_str().unwrap().replace('\\', "");
 	let invoice = string_invoice.parse::<SignedRawInvoice>().unwrap();
 	let invoice = Invoice::from_signed(invoice)?;
 
@@ -657,10 +656,10 @@ async fn altpay_method(
 		log::info!("invoice is expired");
 		return Ok(json!("invoice is expired"));
 	}
-	// need expiry time in seconds from UNIX_EPOCH for PaymnetParameters TODO look into this
+	// need expiry time in seconds from UNIX_EPOCH for PaymnetParameters
 	let expiry = match expiry {
-		Some(_) => Some(
-			expiry.unwrap()
+		Some(expiry) => Some(
+			expiry
 				+ invoice
 					.timestamp()
 					.duration_since(UNIX_EPOCH)
@@ -680,10 +679,9 @@ async fn altpay_method(
 		expiry_time: expiry,
 		max_total_cltv_expiry_delta: 1008,
 		max_path_count: 10,
-		max_channel_saturation_power_of_half: _p.state().config.mpp_pref,
-		previously_failed_channels: _p.state().failed_channels.lock().unwrap().to_vec(), // TODO
+		max_channel_saturation_power_of_half: plugin.state().config.mpp_pref,
+		previously_failed_channels: plugin.state().failed_channels.lock().unwrap().to_vec(), // TODO
 	};
-	// log::info!("{:?}", my_params);
 	// RouteParameters to pass into router
 	let route_params = RouteParameters {
 		payment_params: my_params,
@@ -691,8 +689,8 @@ async fn altpay_method(
 		final_cltv_expiry_delta: 18,
 	};
 
-	let route: Route = match route_find(_p.clone(), &route_params).await {
-		Some(s) => s,
+	let route: Route = match route_find(plugin.clone(), &route_params).await {
+		Some(value) => value,
 		None => return Ok(json!("failed at finding route")),
 	};
 
@@ -706,7 +704,7 @@ async fn altpay_method(
 		*payment_secret,
 		amount,
 		string_invoice.clone(),
-		_p.clone(),
+		plugin.clone(),
 	)
 	.await;
 
