@@ -21,7 +21,7 @@ use lightning::util::ser::{Writeable, Writer};
 use lightning_invoice::*;
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::env;
+use std::{env, fs};
 use std::fs::File;
 use std::path::Path;
 use std::str::FromStr;
@@ -598,13 +598,24 @@ async fn sync_graph(plugin: Plugin<PlugState>) {
 		};
 	
 		let target = format!("{url}{timestam}");
-		let response = reqwest::get(target).await.unwrap().bytes().await.unwrap();
+		let response = reqwest::get(target.clone()).await.unwrap().bytes().await.unwrap();
 		let mut out = File::create(format!("{}/rapid_sync.lngossip", ldk_data_dir.clone())).unwrap();
 		out.write_all(&response).unwrap();
-		rapid_sync
-			.sync_network_graph_with_file_path(&format!("{}/rapid_sync.lngossip", ldk_data_dir.clone()))
-			.unwrap();
-	}
+		match rapid_sync
+			.sync_network_graph_with_file_path(&format!("{}/rapid_sync.lngossip", ldk_data_dir.clone())){
+			Ok(_) => {
+				log::debug!("synced graph");
+			}
+			Err(e) => {
+				log::error!("error syncing graph: {:?}", e);
+				fs::remove_file(format!("{}/rapid_sync.lngossip", ldk_data_dir.clone())).unwrap();
+				let target = format!("{url}0");
+				let response = reqwest::get(target).await.unwrap().bytes().await.unwrap();
+				let mut out = File::create(format!("{}/rapid_sync.lngossip", ldk_data_dir.clone())).unwrap();
+				out.write_all(&response).unwrap();
+				rapid_sync.sync_network_graph_with_file_path(&format!("{}/rapid_sync.lngossip", ldk_data_dir.clone())).unwrap();
+			}
+	}}
 
 }
 
