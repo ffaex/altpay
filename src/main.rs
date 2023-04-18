@@ -1,16 +1,15 @@
 #[macro_use]
 extern crate serde_json;
 mod disk;
-use lightning::ln::channelmanager::{ChannelDetails, ChannelCounterparty};
-use lightning::ln::features::{Features, InitFeatures};
-use lightning::routing::gossip::P2PGossipSync;
 use crate::disk::FilesystemLogger;
 use bitcoin::blockdata::constants::genesis_block;
 use bitcoin::network::constants::Network;
 use bitcoin::secp256k1;
 use cln_plugin::{Builder, Error, Plugin};
+use lightning::ln::channelmanager::{ChannelCounterparty, ChannelDetails};
+use lightning::ln::features::InitFeatures;
 use rand::Rng;
-use cln_rpc::model::{SendpayRequest, SendpayRoute, ListfundsRequest, ListfundsResponse};
+use cln_rpc::model::{SendpayRequest, SendpayRoute, ListfundsRequest, ListfundsResponse, ListpeersPeersChannels, ListpeersPeers, ListpeersResponse};
 use cln_rpc::primitives::{Amount, Secret, ShortChannelId};
 use cln_rpc::{ClnRpc, Request};
 use lightning::routing::router::RouteParameters;
@@ -34,13 +33,13 @@ use tokio::io::{Stdin, Stdout};
 use bitcoin_hashes::sha256;
 use bitcoin_hashes::Hash;
 use cln_plugin::anyhow;
-use lightning::ln::{PaymentSecret, features};
+use lightning::ln::PaymentSecret;
 use config::Config;
 use lightning::routing::gossip::{NetworkGraph, NodeId};
 use lightning_rapid_gossip_sync::RapidGossipSync;
 use rand_core::{OsRng, RngCore};
 use tokio_util::sync::CancellationToken;
-
+use cln_rpc::model::requests::ListpeersRequest;
 
 #[derive(Clone)]
 struct PlugState {
@@ -71,13 +70,14 @@ struct Conf {
 	rpc_path: String,
 	mpp_pref: u8,
 	probe_amount: u64,
+	RapidGossipSync_URL: String,
 }
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
 	let home_dir = match env::var("HOME") {
         Ok(value) => value,
         Err(_) => {
-            log::info!("HOME not set");
+            log::error!("HOME not set");
 			return Ok(())
         }
     };
@@ -91,14 +91,9 @@ async fn main() -> Result<(), anyhow::Error> {
 	};
 
 	let settings = Config::builder()
-		.set_default("network", "testnet")?
-		.set_default("ldk_data_dir", format!("{}/.lightning/.ldk/", home_dir))?
-		.set_default("rpc_path", format!("{}/.lightning/testnet/lightning-rpc", home_dir))?
-		.set_default("mpp_pref", 0)?
-		.set_default("probe_amount", 1000)?
 		.add_source(config::File::with_name(&format!("{}/.config/altpay.toml", home_dir)))
 		.build()
-		.unwrap();
+		.expect("no config file found, please add one in ~/.config/altpay.toml");
 	let mut config: Conf = settings.try_deserialize().unwrap();
 	config.rpc_path = if config.network == "bitcoin" {
 		format!("{}/.lightning/bitcoin/lightning-rpc", home_dir)}
@@ -174,7 +169,6 @@ async fn main() -> Result<(), anyhow::Error> {
 			.start(state)
 			.await?
 	{
-		// sync_graph(plugin.clone()).await;
 		plugin.join().await
 	} else {
 		Ok(())
@@ -244,7 +238,10 @@ async fn network_probe(
 	_p: Plugin<PlugState>,
 	_v: serde_json::Value,
 ) -> Result<serde_json::Value, Error> {
-	sync_graph(_p.clone()).await;
+	match sync_graph(_p.clone()).await {
+		Ok(_) => {},
+		Err(_) => return Err(anyhow!("failed to sync graph")),
+	};
 
 	let graph = _p.clone().state().networkgraph.clone();
 	let nodes = graph.read_only().nodes().clone();
@@ -291,8 +288,7 @@ async fn success(plugin: Plugin<PlugState>, v: serde_json::Value) -> Result<(), 
 }
 
 async fn retry(plugin: Plugin<PlugState>, v: serde_json::Value) -> Result<(), Error> {
-	log::info!("retryingfsddddddddddddd");
-	return Ok(());
+	return Ok(()); //testing purposes
 	let id = v["sendpay_failure"]["data"]["id"]
 		.to_string()
 		.replace('\"', "");
@@ -320,14 +316,13 @@ async fn retry(plugin: Plugin<PlugState>, v: serde_json::Value) -> Result<(), Er
 
 		return Ok(());
 	}
-	log::info!("{}", "retry payment called");
+	log::debug!("{}", "retry payment called");
 	let bolt11 = json!([&v["sendpay_failure"]["data"]["bolt11"]]);
 	let state = plugin.state().clone();
 	let scid = serde_json::to_string(&v["sendpay_failure"]["data"]["erring_channel"])
 		.unwrap()
 		.replace('\"', "");
 	let scid = cl_to_int(&scid);
-	log::info!("scid: {}", scid);
 
 	let vec_routes = plugin.state().clone().vec_routes;
 	let route_hops = vec_routes.lock().unwrap().get(&id).unwrap().to_owned().1;
@@ -353,11 +348,6 @@ async fn retry(plugin: Plugin<PlugState>, v: serde_json::Value) -> Result<(), Er
 	Ok(())
 }
 
-fn update_scorer_from_failed(plugin: Plugin<PlugState>, path: Vec<&RouteHop>, scid: u64) {
-	log::info!("updating scorer from failed");
-	plugin.state().scorer.lock().unwrap().payment_path_failed(&path, scid);
-}
-
 
 // converts shortchannelid from c-lightning format to u64 format which ldk uses
 fn cl_to_int(scid: &str) -> u64 {
@@ -381,8 +371,10 @@ async fn probe(
 	plugin: Plugin<PlugState>,
 	cli_arguments: serde_json::Value,
 ) -> Result<serde_json::Value, anyhow::Error> {
-	sync_graph(plugin.clone()).await;
-
+	match sync_graph(plugin.clone()).await {
+		Ok(_) => (),
+		Err(_) => return Err(anyhow!("couldn't sync graph: ")),
+	};
 	let pub_key_arg = match cli_arguments[0].as_str() {
 		Some(s) => s,
 		None => return Ok(json!("no pub key given as first argument")),
@@ -415,11 +407,11 @@ async fn probe(
 
 	// route_params
 	let route: Route = match route_find(plugin.clone(), &route_params).await {
-		Some(s) => s,
-		None => {
-			log::error!("failed to find route");
+		Ok(s) => s,
+		Err(e) => {
+			log::error!("{}", e.to_string());
 			plugin.state().failed_channels.lock().unwrap().clear();
-			return Ok(json!("failed to find route"));
+			return Err(anyhow!("failed to find route"));
 		}
 	};
 	get_and_send_route(
@@ -461,15 +453,14 @@ async fn get_and_send_route(
 		save_routes.push(save_route.into_boxed_slice());
 		let mut subroute: Vec<SendpayRoute> = Vec::new();
 		// ldk tracks in routehops the fees to pay in at the hop
+		// so ate the last hop is the invoice amount which should arrive
+		// log::info!("{:?}", paths);
 		let mut fees = 0;
 		let mut cltv_total: u16 = 0;
 		// total fees to be paid
 		for i in 0..paths.len() - 1 {
 			fees += paths[i].fee_msat
 		}
-		// fee_msat at the last hop is the amount which should arrive at the payee
-		// https://docs.rs/lightning/0.0.114/lightning/routing/router/struct.RouteHop.html
-		let amount = paths.last().unwrap().fee_msat;
 		// total cltv and save route hops
 		for i in 0..paths.len() {
 			cltv_total += u16::try_from(paths[i].cltv_expiry_delta).unwrap()
@@ -484,9 +475,9 @@ async fn get_and_send_route(
 						.expect("delay couldn't be converted to u16")
 			};
 			let i = SendpayRoute {
-				// amount which is expected at this hop equals to payment amount plus the fees that need to be paid to future hops
-				// https://lightning.readthedocs.io/lightning-getroute.7.html?highlight=getroute#return-value 
-				amount_msat: Amount::from_msat(amount +fees),
+				// amount which is expected at this hop equals to payment amount plus the current fees at his hop
+				// same goes for cltv
+				amount_msat: Amount::from_msat(fees) + amount,
 				id: path.pubkey,
 				delay,
 				channel: ShortChannelId::from_str(&u64_cl(path.short_channel_id))
@@ -568,27 +559,20 @@ async fn get_and_send_route(
 				// see https://github.com/ElementsProject/lightning/issues/956
 				// routing does not pay attention to the state of the local channels
 				log::error!("{:?}", s);
-				if s.code.unwrap() == 204 {
-					let mut scorer_value: Vec<_> = Vec::new();
-					for i in route.paths[i].iter() {
-						scorer_value.push(i)
-					}
+				if s.code.unwrap() != 204 {
 					log::error!("error in sendpay: {:?}", s);
-					update_scorer_from_failed(plugin.clone(), scorer_value, route.paths[i][0].short_channel_id);
-				} else {
-					panic!("error in sendpay: {:?}", s)
 				}
-				// plugin.state()
-				// 	.failed_channels
-				// 	.lock()
-				// 	.unwrap()
-				// 	.push(cl_to_int(&routes[i].to_vec()[0].channel.to_string()));
+				plugin.state()
+					.failed_channels
+					.lock()
+					.unwrap()
+					.push(cl_to_int(&routes[i].to_vec()[0].channel.to_string()));
 			}
 		};
 	}
 }
 
-async fn sync_graph(plugin: Plugin<PlugState>) {
+async fn sync_graph(plugin: Plugin<PlugState>) ->Result<(), ()> {
 	let ldk_data_dir = plugin.state().ldk_data_dir.clone();
 	let network_graph = plugin.state().networkgraph.clone();
 
@@ -598,7 +582,6 @@ async fn sync_graph(plugin: Plugin<PlugState>) {
 		.get_last_rapid_gossip_sync_timestamp()
 		.unwrap_or(0).try_into().unwrap();
 
-	// if timestamp difference to now is less than 6 hours, return no reason to sync
 	if SystemTime::now()
 		.duration_since(UNIX_EPOCH)
 		.unwrap()
@@ -608,110 +591,117 @@ async fn sync_graph(plugin: Plugin<PlugState>) {
 		&& timestam != 0
 	{
 		log::debug!("no need to sync graph");
+		Ok(())
 	} else {
 		log::debug!("syncing graph");
-		let url = if plugin.state().config.network == "bitcoin" {
-			"http://rapidsync.fyodor.de/mainnet/snapshot/".to_string()
-			//"https://rapidsync.lightningdevkit.org/snapshot/".to_string()
-		} else {
-			"http://rapidsync.fyodor.de/snapshot/".to_string()
-		};
+		let url = plugin.state().config.RapidGossipSync_URL.clone();
 	
 		let target = format!("{url}{timestam}");
-		let response = reqwest::get(target.clone()).await.unwrap_or({
-			log::error!("error syncing graph: {:?}", target);
-			
-		}).bytes().await.unwrap();
+		let response = reqwest::get(target.clone()).await.unwrap().bytes().await.unwrap();
 		let mut out = File::create(format!("{}/rapid_sync.lngossip", ldk_data_dir.clone())).unwrap();
 		out.write_all(&response).unwrap();
 		match rapid_sync
 			.sync_network_graph_with_file_path(&format!("{}/rapid_sync.lngossip", ldk_data_dir.clone())){
 			Ok(_) => {
 				log::debug!("synced graph");
+				return Ok(());
 			}
 			Err(e) => {
 				log::error!("error syncing graph: {:?}", e);
+				log::error!("deleting graph and trying again");
 				fs::remove_file(format!("{}/rapid_sync.lngossip", ldk_data_dir.clone())).unwrap();
 				let target = format!("{url}0");
 				let response = reqwest::get(target).await.unwrap().bytes().await.unwrap();
 				let mut out = File::create(format!("{}/rapid_sync.lngossip", ldk_data_dir.clone())).unwrap();
 				out.write_all(&response).unwrap();
-				rapid_sync.sync_network_graph_with_file_path(&format!("{}/rapid_sync.lngossip", ldk_data_dir.clone())).unwrap();
+				// trying again to sync after deleting graph
+				match rapid_sync.sync_network_graph_with_file_path(&format!("{}/rapid_sync.lngossip", ldk_data_dir.clone())){
+					Ok(_) => {
+						log::debug!("synced graph");
+						return Ok(());
+					}
+					Err(e) => {
+						log::error!("error syncing graph: {:?}", e);
+						return Err(());
+					}
+				}
+				
 			}
+		
 	}}
 
 }
 
-async fn route_find(plugin: Plugin<PlugState>, route_params: &RouteParameters) -> Option<Route> {
-	sync_graph(plugin.clone()).await; //TODO enable this
+async fn route_find(plugin: Plugin<PlugState>, route_params: &RouteParameters) -> Result<Route, anyhow::Error> {
+	match sync_graph(plugin.clone()).await {
+		Ok(_) => (),
+		Err(_) => return Err(anyhow!("error syncing graph")),
+	}; 
 
 	let mut bytes = [0u8; 32];
 	OsRng.fill_bytes(&mut bytes);
 
-
+	// trying to get first hops
 	let rpc_path = plugin.state().config.rpc_path.clone();
 	let p = Path::new(&rpc_path);
 	let mut rpc = ClnRpc::new(&p).await.unwrap();
-	let response = rpc
-		.call(Request::ListFunds(ListfundsRequest { spent: None }))
+	let listpeer_response = rpc
+		.call(Request::ListPeers( ListpeersRequest{ id: None, level: None }))
 		.await
 		.unwrap();
-
-	let response: ListfundsResponse = ListfundsResponse::try_from(response).unwrap();
+	let listpeer_response: ListpeersResponse = ListpeersResponse::try_from(listpeer_response).unwrap();
+	//let response: ListfundsResponse = ListfundsResponse::try_from(response).unwrap();
 	let mut first_hops = Vec::new();
-	for i in response.channels{
-		match i.state {
-			cln_rpc::primitives::ChannelState::CHANNELD_NORMAL => {},
-			_ => continue,
+	for peer in listpeer_response.peers{
+		if peer.connected{
+			for channel in peer.channels{
+				match channel.state {
+			        cln_rpc::model::ListpeersPeersChannelsState::CHANNELD_NORMAL => {
+						let hop = ChannelDetails {
+							channel_id: [2; 32],
+							counterparty: ChannelCounterparty{ node_id: peer.id, features : InitFeatures::from_le_bytes(vec![0,0]) , unspendable_punishment_reserve: 0, forwarding_info: None, outbound_htlc_minimum_msat: None, outbound_htlc_maximum_msat: None },
+							funding_txo: None,
+							channel_type: None,
+							short_channel_id: Some(cl_to_int(&channel.short_channel_id.unwrap().to_string())),
+							outbound_scid_alias: None,
+							inbound_scid_alias: None,
+							channel_value_satoshis: channel.total_msat.unwrap().msat() / 1000,
+							unspendable_punishment_reserve: Some(channel.our_reserve_msat.unwrap().msat() / 1000),
+							user_channel_id: 0,
+							balance_msat: channel.spendable_msat.unwrap().msat(),
+							outbound_capacity_msat: channel.spendable_msat.unwrap().msat(),
+							next_outbound_htlc_limit_msat: channel.maximum_htlc_out_msat.unwrap().msat(),
+							inbound_capacity_msat: 0,
+							confirmations_required: Some(3),
+							confirmations: Some(100),
+							force_close_spend_delay: Some(100),
+							is_outbound: true,
+							is_channel_ready: true,
+							is_usable: true,
+							is_public: true,
+							inbound_htlc_minimum_msat: None,
+							inbound_htlc_maximum_msat: None,
+							config: None,
+    					};
+						first_hops.push(hop);
+					},
+					_ => (),
+    			}
+			}
 		}
-		plugin.state().networkgraph.read_only().channel(cl_to_int(&i.short_channel_id.unwrap().to_string())).unwrap();
-		let tmp = [2; 32];
-		//let features = Arc::new(&read_graph.channel(cl_to_int(&i.short_channel_id.unwrap().to_string())).unwrap()).one_to_two.unwrap();
-		//let init = InitFeatures::from_le_bytes(features.encode());
-		let res = ((i.our_amount_msat.msat() as f64) *0.7) as u64;
-		log::info!("{:?} our amount in msat for scid{:?}", res , cl_to_int(&i.short_channel_id.unwrap().to_string()));
-		let hop = ChannelDetails{
-			channel_id: tmp,
-			counterparty: ChannelCounterparty{ node_id: i.peer_id, features : InitFeatures::from_le_bytes(vec![0,0]) , unspendable_punishment_reserve: 0, forwarding_info: None, outbound_htlc_minimum_msat: None, outbound_htlc_maximum_msat: None },
-			funding_txo: None,
-			channel_type: None,
-			short_channel_id: Some(cl_to_int(&i.short_channel_id.unwrap().to_string())),
-			outbound_scid_alias: None,
-			inbound_scid_alias: None,
-			channel_value_satoshis: i.amount_msat.msat(),
-			unspendable_punishment_reserve: Some(((i.amount_msat.msat() as f64)*0.05) as u64),
-			user_channel_id: 123,
-			balance_msat: res,
-			outbound_capacity_msat: res,
-			next_outbound_htlc_limit_msat: res,
-			inbound_capacity_msat: 0,
-			confirmations_required: Some(3),
-			confirmations: Some(100),
-			force_close_spend_delay: Some(100),
-			is_outbound: true,
-			is_channel_ready: true,
-			is_usable: true,
-			is_public: true,
-			inbound_htlc_minimum_msat: None,
-			inbound_htlc_maximum_msat: None,
-			config: None,
-};
-		first_hops.push(hop);
 	}
+
 	let router = DefaultRouter::new(
 		plugin.state().networkgraph.clone(),
 		plugin.state().logger.clone(),
 		bytes,
 		plugin.state().scorer.clone(),
 	);
-
-	let channels = first_hops.iter().collect::<Vec<&ChannelDetails>>();
-	let channel_refs = Some(channels.as_slice());
-	match router.find_route(&plugin.state().pk, route_params, channel_refs , InFlightHtlcs::new()) {
-		Ok(s) => Some(s),
+	match router.find_route(&plugin.state().pk, route_params, first_hops, InFlightHtlcs::new()) {
+		Ok(s) => Ok(s),
 		Err(e) => {
 			log::error!("{:?}", e);
-			None
+			Err(anyhow!("error finding route"))
 		}
 	}
 }
@@ -778,8 +768,8 @@ async fn altpay_method(
 	};
 
 	let route: Route = match route_find(plugin.clone(), &route_params).await {
-		Some(value) => value,
-		None => return Ok(json!("failed at finding route")),
+		Ok(value) => value,
+		Err(e) => return Ok(json!(e.to_string())),
 	};
 
 	let payment_hash = *invoice.payment_hash();

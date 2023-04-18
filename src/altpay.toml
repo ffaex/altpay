@@ -3,3 +3,6 @@ ldk_data_dir = "/root/.lightning/.ldk/" # use different dirs for mainnet and tes
 probe_amount = 100
 mpp_pref = 0.5
 rpc_path="/root/.lightning/testnet/lightning-rpc" # path to the clightning rpc socket
+# possible are https://rapidsync.lightningdevkit.org/ for mainnet
+# and http://rapidsync.fyodor.de/ for testnet
+RapidGossipSync_URL = "http://rapidsync.fyodor.de/mainnet/snapshot/"
