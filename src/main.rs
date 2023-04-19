@@ -214,6 +214,11 @@ fn generate_groupid() -> u64 {
 	rng.gen::<u64>()
 }
 
+fn generate_partid() -> u16 {
+	let mut rng = rand::thread_rng();
+	rng.gen::<u16>()
+}
+
 async fn set_penalty(
 	_p: Plugin<PlugState>,
 	v: serde_json::Value,
@@ -288,7 +293,6 @@ async fn success(plugin: Plugin<PlugState>, v: serde_json::Value) -> Result<(), 
 }
 
 async fn retry(plugin: Plugin<PlugState>, v: serde_json::Value) -> Result<(), Error> {
-	return Ok(()); //testing purposes
 	let id = v["sendpay_failure"]["data"]["id"]
 		.to_string()
 		.replace('\"', "");
@@ -342,6 +346,7 @@ async fn retry(plugin: Plugin<PlugState>, v: serde_json::Value) -> Result<(), Er
 				.unwrap()
 				.payment_path_failed(&scorer_value, scid);
 		}
+		plugin.state().failed_channels.lock().unwrap().push(scid);
 	}
 	altpay_method(plugin.clone(), bolt11.clone()).await?;
 
@@ -393,13 +398,13 @@ async fn probe(
 		expiry_time: None,
 		max_total_cltv_expiry_delta: 1008,
 		max_path_count: 10,
-		max_channel_saturation_power_of_half: plugin.state().config.mpp_pref, // might be used to optimize stuff lol TODO
+		max_channel_saturation_power_of_half: plugin.state().config.mpp_pref, 
 		previously_failed_channels: plugin.state().failed_channels.lock().unwrap().to_vec(), // TODO
 	};
 	// log::info!("{:?}", my_params);
 	let route_params = RouteParameters {
 		payment_params: my_params,
-		final_value_msat: probe_option, //_p.state().conf.probe_amount,
+		final_value_msat: probe_option, 
 		final_cltv_expiry_delta: 18,
 	};
 	let payment_hash = plugin.state().random_pay_hash;
@@ -410,7 +415,7 @@ async fn probe(
 		Ok(s) => s,
 		Err(e) => {
 			log::error!("{}", e.to_string());
-			plugin.state().failed_channels.lock().unwrap().clear();
+			//plugin.state().failed_channels.lock().unwrap().clear();
 			return Err(anyhow!("failed to find route"));
 		}
 	};
@@ -430,10 +435,11 @@ async fn get_and_send_route(
 	route: Route,
 	payment_hash: bitcoin_hashes::sha256::Hash,
 	payment_secret: lightning::ln::PaymentSecret,
-	amount: cln_rpc::primitives::Amount,
+	old_deprecated: cln_rpc::primitives::Amount,
 	string_invoice: String,
 	plugin: Plugin<PlugState>,
 ) {
+	let total_amount = Amount::from_msat(route.get_total_amount());
 	let rpc_path = plugin.state().config.rpc_path.clone();
 	let path_object = Path::new(&rpc_path);
 	let mut rpc = ClnRpc::new(path_object).await.unwrap();
@@ -441,7 +447,6 @@ async fn get_and_send_route(
 	let mut routes = Vec::new();
 	
 	// amount to pay to payee
-	let amount = amount;
 
 	let mut save_routes: Vec<Box<[RouteHop]>> = Vec::new();
 	// route can consist of multiple paths because of multi part payments
@@ -461,6 +466,7 @@ async fn get_and_send_route(
 		for i in 0..paths.len() - 1 {
 			fees += paths[i].fee_msat
 		}
+		let amount = Amount::from_msat(paths.last().unwrap().fee_msat);
 		// total cltv and save route hops
 		for i in 0..paths.len() {
 			cltv_total += u16::try_from(paths[i].cltv_expiry_delta).unwrap()
@@ -522,16 +528,20 @@ async fn get_and_send_route(
 	} else {
 		None
 	};
-
+	let partid: Option<u16> = if routes.len() > 1 {
+		Some(generate_partid())
+	} else {
+		None
+	};
 	for i in 0..routes.len() {
 		let my_request = SendpayRequest {
 			route: routes[i].to_vec(),
 			payment_hash,
 			label: None,
-			amount_msat: Some(routes[i].to_vec().last().unwrap().amount_msat), //final amount is equal to amount expected at last hop
+			amount_msat: Some(total_amount), //final amount is equal to amount expected at last hop
 			bolt11: Some(string_invoice.clone()),
 			payment_secret: Some(Secret::try_from(payment_secret.0.to_vec()).unwrap()),
-			partid: Some(i as u16), 
+			partid: partid, 
 			localinvreqid: None,
 			groupid: groupid,
 		};
@@ -657,6 +667,7 @@ async fn route_find(plugin: Plugin<PlugState>, route_params: &RouteParameters) -
 			for channel in peer.channels{
 				match channel.state {
 			        cln_rpc::model::ListpeersPeersChannelsState::CHANNELD_NORMAL => {
+						log::debug!("spendable msat: {} for channel {:?}", channel.spendable_msat.unwrap().msat(), channel.short_channel_id.unwrap());
 						let hop = ChannelDetails {
 							channel_id: [2; 32],
 							counterparty: ChannelCounterparty{ node_id: peer.id, features : InitFeatures::from_le_bytes(vec![0,0]) , unspendable_punishment_reserve: 0, forwarding_info: None, outbound_htlc_minimum_msat: None, outbound_htlc_maximum_msat: None },
@@ -697,8 +708,15 @@ async fn route_find(plugin: Plugin<PlugState>, route_params: &RouteParameters) -
 		bytes,
 		plugin.state().scorer.clone(),
 	);
-	match router.find_route(&plugin.state().pk, route_params, first_hops, InFlightHtlcs::new()) {
-		Ok(s) => Ok(s),
+	let channels = first_hops.iter().collect::<Vec<&ChannelDetails>>();
+	let channel_refs = Some(channels.as_slice());
+
+	match router.find_route(&plugin.state().pk, route_params, channel_refs, InFlightHtlcs::new()) {
+		Ok(s) => {
+			log::info!("found route: {:?}", s.paths);
+			//panic!("testing");
+			return Ok(s);
+		},
 		Err(e) => {
 			log::error!("{:?}", e);
 			Err(anyhow!("error finding route"))
