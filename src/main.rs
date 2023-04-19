@@ -817,6 +817,6 @@ async fn altpay_method(
 			.expect("couldn't write scorer to disk");
 		log::info!("writing to disk successful");
 	});
-	log::info!("altpay successful");
-	Ok(json!("payment sent"))
+	log::info!("altpay successful; doesnt mean that the payment will not fail");
+	Ok(json!("trying to send payment"))
 }
