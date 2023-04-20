@@ -5,6 +5,7 @@ use crate::disk::FilesystemLogger;
 use bitcoin::blockdata::constants::genesis_block;
 use bitcoin::network::constants::Network;
 use bitcoin::secp256k1;
+use cln_plugin::messages::Response;
 use cln_plugin::{Builder, Error, Plugin};
 use lightning::ln::channelmanager::{ChannelCounterparty, ChannelDetails};
 use lightning::ln::features::InitFeatures;
@@ -56,14 +57,29 @@ struct PlugState {
 	ldk_data_dir: String,
 	logger: Arc<FilesystemLogger>,
 	failed_channels: Arc<Mutex<Vec<u64>>>,
-	vec_routes: Arc<Mutex<HashMap<String, (u128, Box<[RouteHop]>)>>>,
+	payments: Arc<Mutex<HashMap<String, Payment>>>,
 	pk: secp256k1::PublicKey,
 	random_pay_hash: sha256::Hash,
 	config: Conf,
 	ct_token: Arc<Mutex<CancellationToken>>,
 }
+#[derive(Clone, Debug)]
+struct Payment {
+	id: String,
+	payment_hash: sha256::Hash,
+	mpp: bool,
+	probe: bool,
+	failed_channels: Vec<u64>,
+	route: Vec<RouteHop>,
+	created_at: u128,
+	retry_count: u8,
+}
 
-
+impl Payment{
+	pub fn push_failed_channel(&mut self, chan: u64) {
+		self.failed_channels.push(chan);
+	}
+}
 
 #[derive(Debug, Deserialize, Clone)]
 struct Conf {
@@ -135,18 +151,17 @@ async fn main() -> Result<(), anyhow::Error> {
     let mut random_bytes = [0u8; 32];
     rng.fill(&mut random_bytes);
 
-
+	//used for the probe
 	let random_pay_hash = sha256::Hash::from_slice(&random_bytes[..]).unwrap();
 
-	let vec_routes: Arc<Mutex<HashMap<String, (u128, Box<[RouteHop]>)>>> =
-		Arc::new(Mutex::new(HashMap::new()));
+	let payments: Arc<Mutex<HashMap<String, Payment>>> = Arc::new(Mutex::new(HashMap::new()));
 	let state = PlugState {
 		networkgraph: network_graph,
 		scorer,
 		ldk_data_dir,
 		logger,
 		failed_channels,
-		vec_routes,
+		payments,
 		pk: secp256k1::PublicKey::from_str(&pk).unwrap(),
 		random_pay_hash,
 		config,
@@ -274,16 +289,16 @@ async fn network_probe(
 }
 
 async fn success(plugin: Plugin<PlugState>, v: serde_json::Value) -> Result<(), Error> {
-	let vec_routes = plugin.state().clone().vec_routes;
+	let payment_guard = plugin.state().payments.lock().unwrap();
 	let scorer = plugin.state().clone().scorer;
 	let id = v["sendpay_success"]["id"].to_string().replace('\"', "");
 	log::debug!("{id} id of success");
-	let route_hops = match vec_routes.lock().unwrap().get(&id){
-		Some(s) => s.to_owned().1,
+	let payment = match payment_guard.get(&id){
+		Some(s) => s.to_owned(),
 		None => return Ok(()), // not sent with altpay
 	};
 	let mut scorer_value: Vec<_> = Vec::new();
-	for i in route_hops.iter() {
+	for i in payment.route.iter() {
 		scorer_value.push(i)
 	}
 
@@ -295,9 +310,22 @@ async fn success(plugin: Plugin<PlugState>, v: serde_json::Value) -> Result<(), 
 }
 
 async fn retry(plugin: Plugin<PlugState>, v: serde_json::Value) -> Result<(), Error> {
-	let id = v["sendpay_failure"]["data"]["id"]
+	let bolt11 = json!([&v["sendpay_failure"]["data"]["bolt11"]]);
+	// extra scope created so no error is getting raised because of the mutex lock
+	{
+		let id = v["sendpay_failure"]["data"]["id"]
 		.to_string()
 		.replace('\"', "");
+
+		let payment_guard = plugin.state().payments.lock().unwrap();
+		let mut payment = match payment_guard.get(&id){
+			Some(s) => s.to_owned(),
+			None => return Ok(()), // not sent with altpay
+		};
+		// not retrying mpp payments
+		if payment.mpp{
+			return Ok(());
+		}
 
 	if serde_json::to_string(&v["sendpay_failure"]["data"]["payment_hash"])
 		.unwrap()
@@ -305,15 +333,14 @@ async fn retry(plugin: Plugin<PlugState>, v: serde_json::Value) -> Result<(), Er
 		== plugin.state().random_pay_hash.to_string()
 	{
 		log::info!("not retrying because probe");
-		let vec_routes = plugin.state().clone().vec_routes;
-		let routes_guard = vec_routes.lock().unwrap();
 		let now = SystemTime::now()
 			.duration_since(UNIX_EPOCH)
 			.expect("Time went backwards")
 			.as_millis();
 
-		let created_stamp = routes_guard.get(&id).expect("id not found").0;
-		let len_route = routes_guard.get(&id).expect("id not found").1.len();
+		// get item in vec with value id
+		let len_route = payment_guard.get(&id).unwrap().route.len();
+		let created_stamp = payment_guard.get(&id).unwrap().created_at;
 		log::info!(
 			"{}ms ping time; route len of {}",
 			now - created_stamp,
@@ -323,35 +350,27 @@ async fn retry(plugin: Plugin<PlugState>, v: serde_json::Value) -> Result<(), Er
 		return Ok(());
 	}
 	log::debug!("{}", "retry payment called");
-	let bolt11 = json!([&v["sendpay_failure"]["data"]["bolt11"]]);
 	let state = plugin.state().clone();
 	let scid = serde_json::to_string(&v["sendpay_failure"]["data"]["erring_channel"])
 		.unwrap()
 		.replace('\"', "");
 	let scid = cl_to_int(&scid);
 
-	let vec_routes = plugin.state().clone().vec_routes;
-	let route_hops = vec_routes.lock().unwrap().get(&id).unwrap().to_owned().1;
-
 	let mut scorer_value: Vec<_> = Vec::new();
-	for i in route_hops.iter() {
+	for i in payment.route.iter() {
 		scorer_value.push(i)
 	}
+	state
+		.scorer
+		.lock()
+		.unwrap()
+		.payment_path_failed(&scorer_value, scid);
 
-	{
-		let guard = state.vec_routes.lock().unwrap();
-		let hashmap_result = guard.get(&id);
-		if hashmap_result.is_some() {
-			state
-				.scorer
-				.lock()
-				.unwrap()
-				.payment_path_failed(&scorer_value, scid);
-		}
-		plugin.state().failed_channels.lock().unwrap().push(scid);
+
+	payment.push_failed_channel(scid);
+
 	}
-	//altpay_method(plugin.clone(), bolt11.clone()).await?;
-
+	altpay_method(plugin.clone(), bolt11.clone()).await;
 	Ok(())
 }
 
@@ -403,7 +422,6 @@ async fn probe(
 		max_channel_saturation_power_of_half: plugin.state().config.mpp_pref, 
 		previously_failed_channels: plugin.state().failed_channels.lock().unwrap().to_vec(), // TODO
 	};
-	// log::info!("{:?}", my_params);
 	let route_params = RouteParameters {
 		payment_params: my_params,
 		final_value_msat: probe_option, 
@@ -417,7 +435,6 @@ async fn probe(
 		Ok(s) => s,
 		Err(e) => {
 			log::error!("{}", e.to_string());
-			//plugin.state().failed_channels.lock().unwrap().clear();
 			return Err(anyhow!("failed to find route"));
 		}
 	};
@@ -446,7 +463,6 @@ async fn get_and_send_route(
 
 	let mut routes = Vec::new();
 	
-	// amount to pay to payee
 
 	let mut save_routes: Vec<Box<[RouteHop]>> = Vec::new();
 	// route can consist of multiple paths because of multi part payments
@@ -523,12 +539,17 @@ async fn get_and_send_route(
 
 
 	// create groupid if its a MPP payment
-	let groupid = if routes.len() > 1 {
+	let mpp = if routes.len() > 1 {
+		true
+	} else {
+		false
+	};
+	let groupid = if mpp {
 		Some(generate_groupid())
 	} else {
 		None
 	};
-	let partid: Option<u16> = if routes.len() > 1 {
+	let partid: Option<u16> = if mpp {
 		Some(generate_partid())
 	} else {
 		None
@@ -555,29 +576,25 @@ async fn get_and_send_route(
 				let tmp: serde_json::Value =
 					serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
 				let id = tmp["result"]["id"].to_string().replace('\"', "");
-				log::debug!("{id} id of insert");
+				let sent_payment = Payment{
+					id : id.clone(),
+					payment_hash: payment_hash,
+					mpp: mpp,
+					probe: if string_invoice.contains("Probe") {true} else {false},
+					failed_channels : Vec::new(),
+					route : route.paths[i].to_vec(),
+					created_at : start_time,
+					retry_count : 0,
+				};
 				plugin.state()
 					.clone()
-					.vec_routes
-					.clone()
+					.payments
 					.lock()
 					.unwrap()
-					.insert(id, (start_time, save_routes[i].to_owned())); //TODO
+					.insert(id, sent_payment);
 			}
 			Err(s) => {
-				// if rpc error usually because network_graph doesnt have local state so remove chanell temporarily
-				// see https://github.com/ElementsProject/lightning/issues/956
-				// routing does not pay attention to the state of the local channels
-				log::error!("{:?}", s);
-				if s.code.unwrap() != 204 {
-					log::error!("error in sendpay: {:?}", s);
-				}
-				log::error!("error in sendpay: {:?}", s);
-				plugin.state()
-					.failed_channels
-					.lock()
-					.unwrap()
-					.push(cl_to_int(&routes[i].to_vec()[0].channel.to_string()));
+				log::error!("sendpay failed: {}", s);
 			}
 		};
 	}
@@ -732,7 +749,6 @@ async fn altpay_method(
 	let ldk_data_dir = plugin.state().ldk_data_dir.clone();
 	let network_graph = plugin.state().networkgraph.clone();
 	let scorer = plugin.state().scorer.clone();
-	let _logger = plugin.state().logger.clone();
 
 	// invoice stuff
 	let string_invoice = cli_arguments.get(0).unwrap().as_str().unwrap().replace('\\', "");
@@ -792,8 +808,7 @@ async fn altpay_method(
 	};
 
 	let payment_hash = *invoice.payment_hash();
-	let payment_secret = invoice.payment_secret(); // maybe derefernce
-	let amount = Amount::from_msat(invoice.amount_milli_satoshis().unwrap());
+	let payment_secret = invoice.payment_secret();
 
 	get_and_send_route(
 		route,
@@ -827,7 +842,7 @@ async fn altpay_method(
 	
 	let parse_response = WaitsendpayResponse::try_from(response);
 	match parse_response {
-		Ok(value) => {
+		Ok(_) => {
 			log::info!("altpay successful");
 			return Ok(json!("altpay successful"));
 		},
