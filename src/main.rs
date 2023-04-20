@@ -9,7 +9,7 @@ use cln_plugin::{Builder, Error, Plugin};
 use lightning::ln::channelmanager::{ChannelCounterparty, ChannelDetails};
 use lightning::ln::features::InitFeatures;
 use rand::Rng;
-use cln_rpc::model::{SendpayRequest, SendpayRoute, ListfundsRequest, ListfundsResponse, ListpeersPeersChannels, ListpeersPeers, ListpeersResponse};
+use cln_rpc::model::{SendpayRequest, SendpayRoute, ListpeersResponse, WaitsendpayStatus, WaitsendpayResponse};
 use cln_rpc::primitives::{Amount, Secret, ShortChannelId};
 use cln_rpc::{ClnRpc, Request};
 use lightning::routing::router::RouteParameters;
@@ -62,6 +62,8 @@ struct PlugState {
 	config: Conf,
 	ct_token: Arc<Mutex<CancellationToken>>,
 }
+
+
 
 #[derive(Debug, Deserialize, Clone)]
 struct Conf {
@@ -348,7 +350,7 @@ async fn retry(plugin: Plugin<PlugState>, v: serde_json::Value) -> Result<(), Er
 		}
 		plugin.state().failed_channels.lock().unwrap().push(scid);
 	}
-	altpay_method(plugin.clone(), bolt11.clone()).await?;
+	//altpay_method(plugin.clone(), bolt11.clone()).await?;
 
 	Ok(())
 }
@@ -572,6 +574,7 @@ async fn get_and_send_route(
 				if s.code.unwrap() != 204 {
 					log::error!("error in sendpay: {:?}", s);
 				}
+				log::error!("error in sendpay: {:?}", s);
 				plugin.state()
 					.failed_channels
 					.lock()
@@ -817,6 +820,23 @@ async fn altpay_method(
 			.expect("couldn't write scorer to disk");
 		log::info!("writing to disk successful");
 	});
-	log::info!("altpay successful; doesnt mean that the payment will not fail");
-	Ok(json!("trying to send payment"))
+
+	let rpc_path = plugin.state().config.rpc_path.clone();
+	let path_object = Path::new(&rpc_path);
+	let mut rpc = ClnRpc::new(path_object).await.unwrap();
+	let response = rpc
+		.call(Request::WaitSendPay(cln_rpc::model::WaitsendpayRequest { payment_hash: payment_hash, timeout: None, partid: None, groupid: None, }))
+		.await?;
+	
+	let parse_response = WaitsendpayResponse::try_from(response);
+	match parse_response {
+		Ok(value) => {
+			log::info!("altpay successful");
+			return Ok(json!("altpay successful"));
+		},
+		Err(e) => {
+			log::error!("{:?}", e);
+			return Ok(json!("altpay failed"));
+		}
+	}
 }
