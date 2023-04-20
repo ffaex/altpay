@@ -425,7 +425,6 @@ async fn probe(
 		route,
 		payment_hash,
 		payment_secret,
-		Amount::from_msat(probe_option),
 		String::from("Probe"),
 		plugin.clone(),
 	)
@@ -437,7 +436,6 @@ async fn get_and_send_route(
 	route: Route,
 	payment_hash: bitcoin_hashes::sha256::Hash,
 	payment_secret: lightning::ln::PaymentSecret,
-	old_deprecated: cln_rpc::primitives::Amount,
 	string_invoice: String,
 	plugin: Plugin<PlugState>,
 ) {
@@ -801,7 +799,6 @@ async fn altpay_method(
 		route,
 		payment_hash,
 		*payment_secret,
-		amount,
 		string_invoice.clone(),
 		plugin.clone(),
 	)
