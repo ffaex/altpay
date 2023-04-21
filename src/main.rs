@@ -5,7 +5,6 @@ use crate::disk::FilesystemLogger;
 use bitcoin::blockdata::constants::genesis_block;
 use bitcoin::network::constants::Network;
 use bitcoin::secp256k1;
-use cln_plugin::messages::Response;
 use cln_plugin::{Builder, Error, Plugin};
 use lightning::ln::channelmanager::{ChannelCounterparty, ChannelDetails};
 use lightning::ln::features::InitFeatures;
@@ -311,6 +310,7 @@ async fn success(plugin: Plugin<PlugState>, v: serde_json::Value) -> Result<(), 
 
 async fn retry(plugin: Plugin<PlugState>, v: serde_json::Value) -> Result<(), Error> {
 	let bolt11 = json!([&v["sendpay_failure"]["data"]["bolt11"]]);
+	log::info!("retrying payment");
 	// extra scope created so no error is getting raised because of the mutex lock
 	{
 		let id = v["sendpay_failure"]["data"]["id"]
@@ -539,7 +539,7 @@ async fn get_and_send_route(
 
 
 	// create groupid if its a MPP payment
-	let mpp = if routes.len() > 1 {
+	let mpp = if route.paths.len() > 1 {
 		true
 	} else {
 		false
@@ -752,7 +752,14 @@ async fn altpay_method(
 
 	// invoice stuff
 	let string_invoice = cli_arguments.get(0).unwrap().as_str().unwrap().replace('\\', "");
-	let invoice = string_invoice.parse::<SignedRawInvoice>().unwrap();
+	let invoice = match string_invoice.parse::<SignedRawInvoice>(){
+		Ok(invoice) => invoice,
+		Err(e) => {
+			log::error!("error parsing invoice: {:?}", e);
+			return Ok(json!("error parsing invoice"));
+		}
+	};
+	
 	let invoice = Invoice::from_signed(invoice)?;
 
 	// get data from invoice
