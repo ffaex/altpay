@@ -687,7 +687,16 @@ async fn route_find(plugin: Plugin<PlugState>, route_params: &RouteParameters) -
 				match channel.state {
 			        cln_rpc::model::ListpeersPeersChannelsState::CHANNELD_NORMAL => {
 						log::debug!("spendable msat: {} for channel {:?}", channel.spendable_msat.unwrap().msat(), channel.short_channel_id.unwrap());
-						let features = network_graph.channel(cl_to_int(&channel.short_channel_id.unwrap().to_string())).unwrap().features.encode();
+						log::info!("channel id: {:?}", channel.short_channel_id);
+						let local_channel_state = network_graph.channel(cl_to_int(&channel.short_channel_id.unwrap().to_string()));
+						let features = match local_channel_state {
+							Some(local_channel_state) => local_channel_state.features.encode(),
+							None => {
+								log::error!("channel {:?} not found in local graph", channel.short_channel_id.unwrap());
+								continue;
+							}
+						};
+						log::info!("features: {:?}", features);
 						let hop = ChannelDetails {
 							channel_id: [2; 32],
 							counterparty: ChannelCounterparty{ node_id: peer.id, features : InitFeatures::from_le_bytes(features) , unspendable_punishment_reserve: 0, forwarding_info: None, outbound_htlc_minimum_msat: None, outbound_htlc_maximum_msat: None },
@@ -753,16 +762,21 @@ async fn altpay_method(
 	let scorer = plugin.state().scorer.clone();
 
 	// invoice stuff
-	let string_invoice = cli_arguments.get(0).unwrap().as_str().unwrap().replace('\\', "");
+	let string_invoice = match cli_arguments.get(0) {
+		Some(invoice) => invoice.as_str().unwrap().replace('\\', ""),
+		None => {
+			log::error!("no invoice provided");
+			return Ok(json!("no invoice provided"));
+		}
+	};
 	let invoice = match string_invoice.parse::<SignedRawInvoice>(){
-		Ok(invoice) => invoice,
+		Ok(invoice) => Invoice::from_signed(invoice).unwrap(),
 		Err(e) => {
 			log::error!("error parsing invoice: {:?}", e);
 			return Ok(json!("error parsing invoice"));
-		}
+			},
 	};
 	
-	let invoice = Invoice::from_signed(invoice)?;
 
 	// get data from invoice
 	let hint = invoice.route_hints();
