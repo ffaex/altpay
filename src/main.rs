@@ -680,15 +680,17 @@ async fn route_find(plugin: Plugin<PlugState>, route_params: &RouteParameters) -
 	let listpeer_response: ListpeersResponse = ListpeersResponse::try_from(listpeer_response).unwrap();
 	//let response: ListfundsResponse = ListfundsResponse::try_from(response).unwrap();
 	let mut first_hops = Vec::new();
+	let network_graph = plugin.state().networkgraph.read_only();
 	for peer in listpeer_response.peers{
 		if peer.connected{
 			for channel in peer.channels{
 				match channel.state {
 			        cln_rpc::model::ListpeersPeersChannelsState::CHANNELD_NORMAL => {
 						log::debug!("spendable msat: {} for channel {:?}", channel.spendable_msat.unwrap().msat(), channel.short_channel_id.unwrap());
+						let features = network_graph.channel(cl_to_int(&channel.short_channel_id.unwrap().to_string())).unwrap().features.encode();
 						let hop = ChannelDetails {
 							channel_id: [2; 32],
-							counterparty: ChannelCounterparty{ node_id: peer.id, features : InitFeatures::from_le_bytes(vec![0,0]) , unspendable_punishment_reserve: 0, forwarding_info: None, outbound_htlc_minimum_msat: None, outbound_htlc_maximum_msat: None },
+							counterparty: ChannelCounterparty{ node_id: peer.id, features : InitFeatures::from_le_bytes(features) , unspendable_punishment_reserve: 0, forwarding_info: None, outbound_htlc_minimum_msat: None, outbound_htlc_maximum_msat: None },
 							funding_txo: None,
 							channel_type: None,
 							short_channel_id: Some(cl_to_int(&channel.short_channel_id.unwrap().to_string())),
