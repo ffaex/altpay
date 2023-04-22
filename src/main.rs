@@ -684,6 +684,8 @@ async fn route_find(plugin: Plugin<PlugState>, route_params: &RouteParameters) -
 							}
 						};
 						log::info!("features: {:?}", features);
+						// spendable msat is the pretty much the only interesting info we need
+						// rest is useless for routing purposes
 						let hop = ChannelDetails {
 							channel_id: [2; 32],
 							counterparty: ChannelCounterparty{ node_id: peer.id, features : InitFeatures::from_le_bytes(features) , unspendable_punishment_reserve: 0, forwarding_info: None, outbound_htlc_minimum_msat: None, outbound_htlc_maximum_msat: None },
