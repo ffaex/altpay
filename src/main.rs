@@ -866,23 +866,6 @@ async fn altpay_method(
 			.expect("couldn't write scorer to disk");
 		log::info!("writing to disk successful");
 	});
+	Ok(json!("altpay sent, payment can still fail"))
 
-	let rpc_path = plugin.state().config.rpc_path.clone();
-	let path_object = Path::new(&rpc_path);
-	let mut rpc = ClnRpc::new(path_object).await.unwrap();
-	let response = rpc
-		.call(Request::WaitSendPay(cln_rpc::model::WaitsendpayRequest { payment_hash: payment_hash, timeout: None, partid: None, groupid: None, }))
-		.await?;
-	
-	let parse_response = WaitsendpayResponse::try_from(response);
-	match parse_response {
-		Ok(_) => {
-			log::info!("altpay successful");
-			return Ok(json!("altpay successful"));
-		},
-		Err(e) => {
-			log::error!("waitsendpay failed with {:?}", e);
-			return Ok(json!("altpay failed"));
-		}
-	}
 }
