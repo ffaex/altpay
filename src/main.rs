@@ -9,7 +9,7 @@ use cln_plugin::{Builder, Error, Plugin};
 use lightning::ln::channelmanager::{ChannelCounterparty, ChannelDetails};
 use lightning::ln::features::InitFeatures;
 use rand::Rng;
-use cln_rpc::model::{SendpayRequest, SendpayRoute, ListpeersResponse, WaitsendpayStatus, WaitsendpayResponse};
+use cln_rpc::model::{SendpayRequest, SendpayRoute, ListpeersResponse, WaitsendpayResponse};
 use cln_rpc::primitives::{Amount, Secret, ShortChannelId};
 use cln_rpc::{ClnRpc, Request};
 use lightning::routing::router::RouteParameters;
@@ -33,7 +33,7 @@ use tokio::io::{Stdin, Stdout};
 use bitcoin_hashes::sha256;
 use bitcoin_hashes::Hash;
 use cln_plugin::anyhow;
-use lightning::ln::{PaymentSecret, PaymentHash};
+use lightning::ln::{PaymentSecret};
 use config::Config;
 use lightning::routing::gossip::{NetworkGraph, NodeId};
 use lightning_rapid_gossip_sync::RapidGossipSync;
@@ -77,11 +77,6 @@ struct Payment {
 	payment_secret: PaymentSecret,
 }
 
-impl Payment{
-	pub fn push_failed_channel(&mut self, chan: u64) {
-		self.failed_channels.push(chan);
-	}
-}
 
 #[derive(Debug, Deserialize, Clone)]
 struct Conf {
@@ -283,11 +278,7 @@ async fn network_probe(
 			}
 			tokio::time::sleep(Duration::from_millis(5000)).await;
 		}	
-	});
-
-	
-
-		
+	});	
 	Ok(json!("network probe started"))
 }
 
@@ -499,21 +490,21 @@ async fn get_and_send_route(
 		let mut fees = 0;
 		let mut cltv_total: u16 = 0;
 		// total fees to be paid
-		for i in 0..paths.len() - 1 {
-			fees += paths[i].fee_msat
+		for i in 0..ldk_path.len() - 1 {
+			fees += ldk_path[i].fee_msat
 		}
-		let amount = Amount::from_msat(paths.last().unwrap().fee_msat);
+		let amount = Amount::from_msat(ldk_path.last().unwrap().fee_msat);
 		// total cltv and save route hops
-		for i in 0..paths.len() {
-			cltv_total += u16::try_from(paths[i].cltv_expiry_delta).unwrap()
+		for i in 0..ldk_path.len() {
+			cltv_total += u16::try_from(ldk_path[i].cltv_expiry_delta).unwrap()
 		}
-		for j in 0..paths.len() - 1 {
-			let path: &RouteHop = &paths[j];
+		for j in 0..ldk_path.len() - 1 {
+			let path: &RouteHop = &ldk_path[j];
 			let delay = if j == 0 {
 				cltv_total
 			} else {
 				u16::try_from(subroute[j - 1].delay).expect("failed u16")
-					- u16::try_from(paths[j - 1].cltv_expiry_delta)
+					- u16::try_from(ldk_path[j - 1].cltv_expiry_delta)
 						.expect("delay couldn't be converted to u16")
 			};
 			let i = SendpayRoute {
@@ -530,26 +521,26 @@ async fn get_and_send_route(
 		}
 		// set last hop manually because
 		// if path consists of only one routehop special treatment
-		if paths.len() == 1 {
+		if ldk_path.len() == 1 {
 			let i = SendpayRoute {
-				amount_msat: Amount::from_msat(paths.last().unwrap().fee_msat),
-				id: paths.last().unwrap().pubkey,
-				delay: u16::try_from(paths.last().unwrap().cltv_expiry_delta).unwrap(),
-				channel: ShortChannelId::from_str(&u64_cl(paths.last().unwrap().short_channel_id))
+				amount_msat: Amount::from_msat(ldk_path.last().unwrap().fee_msat),
+				id: ldk_path.last().unwrap().pubkey,
+				delay: u16::try_from(ldk_path.last().unwrap().cltv_expiry_delta).unwrap(),
+				channel: ShortChannelId::from_str(&u64_cl(ldk_path.last().unwrap().short_channel_id))
 					.expect("couldn't convert from u64 to scid"),
 			};
 			subroute.push(i);
 			routes.push(subroute);
 		} else {
 			let i = SendpayRoute {
-				amount_msat: Amount::from_msat(paths.last().unwrap().fee_msat),
-				id: paths.last().unwrap().pubkey,
+				amount_msat: Amount::from_msat(ldk_path.last().unwrap().fee_msat),
+				id: ldk_path.last().unwrap().pubkey,
 				// https://docs.rs/lightning/0.0.113/lightning/routing/router/struct.RouteHop.html#structfield.cltv_expiry_delta
 				// The CLTV delta added for this hop. For the last hop, this should be the full CLTV value expected at the destination, in excess of the current block height.
 				delay: u16::try_from(subroute.last().unwrap().delay).expect("failed u16")
-					- u16::try_from(paths[paths.len() - 2].cltv_expiry_delta)
+					- u16::try_from(ldk_path[ldk_path.len() - 2].cltv_expiry_delta)
 						.expect("delay couldn't be converted to u16"),
-				channel: ShortChannelId::from_str(&u64_cl(paths.last().unwrap().short_channel_id))
+				channel: ShortChannelId::from_str(&u64_cl(ldk_path.last().unwrap().short_channel_id))
 					.expect("couldn't convert from u64 to scid"),
 			};
 			subroute.push(i);
@@ -577,15 +568,10 @@ async fn get_and_send_route(
 		match rpc.call(Request::SendPay(my_request)).await {
 			Ok(p) => {
 				log::info!("sendpay succeeded: {:?}", p);
-				let start_time = SystemTime::now()
-					.duration_since(UNIX_EPOCH)
-					.expect("Time went backwards")
-					.as_millis();
 				let sent_payment = route.paths[i].clone();
 				let tmp: serde_json::Value =
 					serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
 				let id = tmp["result"]["id"].to_string().replace('\"', "");
-				let sent_payment = 
 				plugin.state()
 					.clone()
 					.send_pay_routes
@@ -776,7 +762,7 @@ async fn route_params_from_invoice(invoice: Invoice, plugin: Plugin<PlugState>, 
 	};
 	if invoice.is_expired() {
 		log::info!("invoice is expired");
-		return Ok(json!("invoice is expired"));
+		return Err(anyhow!("invoice is expired"));
 	}
 	// need expiry time in seconds from UNIX_EPOCH for PaymnetParameters
 	let expiry = match expiry {
