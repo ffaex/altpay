@@ -475,7 +475,7 @@ async fn get_and_send_route(
 		let mut subroute: Vec<SendpayRoute> = Vec::new();
 		// ldk tracks in routehops the fees to pay in at the hop
 		// so ate the last hop is the invoice amount which should arrive
-		// log::info!("{:?}", paths);
+		// https://docs.rs/lightning/latest/lightning/routing/router/struct.RouteHop.html#structfield.fee_msat
 		let mut fees = 0;
 		let mut cltv_total: u16 = 0;
 		// total fees to be paid
@@ -549,12 +549,13 @@ async fn get_and_send_route(
 	} else {
 		None
 	};
-	let partid: Option<u16> = if mpp {
-		Some(generate_partid())
-	} else {
-		None
-	};
+
 	for i in 0..routes.len() {
+		let partid: Option<u16> = if mpp {
+			Some(generate_partid())
+		} else {
+			None
+		};
 		let my_request = SendpayRequest {
 			route: routes[i].to_vec(),
 			payment_hash,
