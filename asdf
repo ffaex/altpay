@@ -1,7 +1,0 @@
-	for (key, _info) in nodes {
-		let pubkey = secp256k1::PublicKey::from_slice(&key.as_slice()).unwrap();
-		let _p_clone = _p.clone();
-
-		probe(_p_clone.clone(), json!([pubkey.to_string()])).await.unwrap();
-		// async sleep
-}
