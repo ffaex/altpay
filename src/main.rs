@@ -374,12 +374,17 @@ async fn retry(plugin: Plugin<PlugState>, v: serde_json::Value) -> Result<(), Er
 		let payment_guard = plugin.state().payments.lock().unwrap();
 		let mut failed_pay = payment_guard.get(bolt11).unwrap().clone();
 		failed_pay.failed_channels.push(cl_to_int(&scid));
+		failed_pay.retry_count += 1;
 		plugin.state().payments.lock().unwrap().insert(bolt11.to_string(), failed_pay);
 	}
 	let payment = {
 		let payment_guard = plugin.state().payments.lock().unwrap();
 		payment_guard.get(bolt11).unwrap().clone()
 	};
+	if payment.retry_count > 8 {
+		log::info!("{} retries exceeded", payment.retry_count);
+		return Ok(());
+	}
 	retry_pay(payment, plugin.clone()).await;
 
 	Ok(())
