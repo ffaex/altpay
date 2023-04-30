@@ -371,11 +371,11 @@ async fn retry(plugin: Plugin<PlugState>, v: serde_json::Value) -> Result<(), Er
 	
 	// add failed channel to payment
 	{
-		let payment_guard = plugin.state().payments.lock().unwrap();
+		let mut payment_guard = plugin.state().payments.lock().unwrap();
 		let mut failed_pay = payment_guard.get(bolt11).unwrap().clone();
 		failed_pay.failed_channels.push(cl_to_int(&scid));
 		failed_pay.retry_count += 1;
-		plugin.state().payments.lock().unwrap().insert(bolt11.to_string(), failed_pay);
+		payment_guard.insert(bolt11.to_string(), failed_pay);
 	}
 	let payment = {
 		let payment_guard = plugin.state().payments.lock().unwrap();
