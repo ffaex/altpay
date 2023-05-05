@@ -9,7 +9,7 @@ use cln_plugin::{Builder, Error, Plugin};
 use lightning::ln::channelmanager::{ChannelCounterparty, ChannelDetails};
 use lightning::ln::features::InitFeatures;
 use rand::Rng;
-use cln_rpc::model::{SendpayRequest, SendpayRoute, ListpeersResponse, WaitsendpayResponse};
+use cln_rpc::model::{SendpayRequest, SendpayRoute, ListpeersResponse};
 use cln_rpc::primitives::{Amount, Secret, ShortChannelId};
 use cln_rpc::{ClnRpc, Request};
 use lightning::routing::router::RouteParameters;
@@ -74,7 +74,6 @@ struct Payment {
 	created_at: u128,
 	retry_count: u8,
 	groupid: u64,
-	payment_secret: PaymentSecret,
 }
 
 
@@ -85,7 +84,7 @@ struct Conf {
 	rpc_path: String,
 	mpp_pref: u8,
 	probe_amount: u64,
-	RapidGossipSync_URL: String,
+	rapid_gossip_sync_url: String,
 }
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
@@ -614,7 +613,7 @@ async fn sync_graph(plugin: Plugin<PlugState>) ->Result<(), ()> {
 		Ok(())
 	} else {
 		log::debug!("syncing graph");
-		let url = plugin.state().config.RapidGossipSync_URL.clone();
+		let url = plugin.state().config.rapid_gossip_sync_url.clone();
 	
 		let target = format!("{url}{timestam}");
 		let response = reqwest::get(target.clone()).await.unwrap().bytes().await.unwrap();
@@ -846,7 +845,7 @@ async fn altpay_method(
 	let total_amount = Amount::from_msat(route.get_total_amount());
 
 	let groupid = generate_groupid();
-	plugin.state().payments.lock().unwrap().insert(string_invoice.clone(), Payment { total_amount: total_amount, failed_channels: vec![], created_at: SystemTime::now().duration_since(UNIX_EPOCH).expect("time went backwards").as_millis(), retry_count: 0, groupid: groupid, payment_secret: *payment_secret, bolt11: string_invoice.clone() });
+	plugin.state().payments.lock().unwrap().insert(string_invoice.clone(), Payment { total_amount: total_amount, failed_channels: vec![], created_at: SystemTime::now().duration_since(UNIX_EPOCH).expect("time went backwards").as_millis(), retry_count: 0, groupid: groupid, bolt11: string_invoice.clone() });
 
 
 	get_and_send_route(
