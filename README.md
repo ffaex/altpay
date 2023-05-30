@@ -53,3 +53,7 @@ lightning-cli --testnet altpay bolt11_invoice
 lightning-cli --testnet probe pubkey amount_msat  
 lightning-cli --testnet set_penalty pubkey penalty_value (the lower the better)
 lightning-cli --testnet network_probe 
+
+# Special Thanks  
+[@elsirion](https://github.com/elsirion)  
+[@fiatjaf](https://github.com/fiatjaf)
